@@ -267,6 +267,7 @@ class DocumentConverter:
             settings.perf.doc_batch_size,  # pass format_options
         ):
             _log.info(f"Going to convert document batch...")
+            _log.info(f"GERMAN GWAPO")
 
             # parallel processing only within input_batch
             # with ThreadPoolExecutor(

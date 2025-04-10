@@ -6,6 +6,8 @@ from typing import Iterable, Optional, Union
 
 from docling_core.types.doc import DocItemLabel
 from docling_ibm_models.layoutmodel.layout_predictor import LayoutPredictor
+from doclayout_yolo import YOLOv10
+from huggingface_hub import hf_hub_download
 from PIL import Image
 
 from docling.datamodel.base_models import BoundingBox, Cluster, LayoutPrediction, Page
@@ -44,6 +46,18 @@ class LayoutModel(BasePageModel):
     FIGURE_LABEL = DocItemLabel.PICTURE
     FORMULA_LABEL = DocItemLabel.FORMULA
     CONTAINER_LABELS = [DocItemLabel.FORM, DocItemLabel.KEY_VALUE_REGION]
+    MODEL_TO_DOC_LABEL_MAP = {
+        "title": "Title",
+        "plain text": "Text",
+        "figure": "Picture",
+        "figure_caption": "Caption",
+        "table": "Table",
+        "table_caption": "Caption",
+        "table_footnote": "Footnote",
+        "isolate_formula": "Formula",
+        "formula_caption": "Caption",
+        # 'abandon': 'background' or skip
+    }
 
     def __init__(
         self, artifacts_path: Optional[Path], accelerator_options: AcceleratorOptions
@@ -142,6 +156,12 @@ class LayoutModel(BasePageModel):
     def __call__(
         self, conv_res: ConversionResult, page_batch: Iterable[Page]
     ) -> Iterable[Page]:
+        filepath = hf_hub_download(
+            repo_id="juliozhao/DocLayout-YOLO-DocStructBench",
+            filename="doclayout_yolo_docstructbench_imgsz1024.pt",
+        )
+        model = YOLOv10(filepath)
+        print("GERMAN using model YOLOv10")
 
         for page in page_batch:
             assert page._backend is not None
@@ -152,25 +172,70 @@ class LayoutModel(BasePageModel):
                     assert page.size is not None
                     page_image = page.get_image(scale=1.0)
                     assert page_image is not None
+                    page_image.save("./temp.png")
 
                     clusters = []
-                    for ix, pred_item in enumerate(
-                        self.layout_predictor.predict(page_image)
-                    ):
-                        label = DocItemLabel(
-                            pred_item["label"]
-                            .lower()
-                            .replace(" ", "_")
-                            .replace("-", "_")
-                        )  # Temporary, until docling-ibm-model uses docling-core types
-                        cluster = Cluster(
-                            id=ix,
-                            label=label,
-                            confidence=pred_item["confidence"],
-                            bbox=BoundingBox.model_validate(pred_item),
-                            cells=[],
-                        )
-                        clusters.append(cluster)
+                    for ix, pred_item in enumerate(model.predict("./temp.png")):
+                        print("GERMAN pred_item names", ix, pred_item.names)
+                        print("GERMAN pred_item boxes", ix, pred_item.boxes)
+
+                        # Get all box info
+                        xyxy = pred_item.boxes.xyxy
+                        confs = pred_item.boxes.conf
+                        clses = pred_item.boxes.cls
+                        names = pred_item.names
+
+                        for j, box in enumerate(xyxy):
+                            l, t, r, b = box.tolist()
+                            conf = confs[j].item()
+                            cls_idx = int(clses[j].item())
+
+                            cls_idx = int(clses[j].item())
+                            model_label = names.get(cls_idx, "unknown")
+
+                            # Skip unwanted classes (e.g. 'abandon')
+                            if model_label == "abandon":
+                                continue
+
+                            # Map to desired label
+                            mapped_label = self.MODEL_TO_DOC_LABEL_MAP.get(
+                                model_label, "unknown"
+                            )
+                            label = DocItemLabel(
+                                mapped_label.lower().replace(" ", "_").replace("-", "_")
+                            )
+                            cluster = Cluster(
+                                id=ix * j,
+                                label=label,
+                                confidence=conf,
+                                bbox=BoundingBox.model_validate(
+                                    {"l": l, "t": t, "r": r, "b": b}
+                                ),
+                                cells=[],
+                            )
+
+                            clusters.append(cluster)
+                        # label = DocItemLabel(
+                        #     f"label_pred_item_{ix}".format(ix=ix)
+                        #     .lower()
+                        #     .replace(" ", "_")
+                        #     .replace("-", "_")
+                        # )  # Temporary, until docling-ibm-model uses docling-core types
+                        # cluster = Cluster(
+                        #     id=ix,
+                        #     label=label,
+                        #     confidence=pred_item.boxes["conf"],
+                        #     bbox=BoundingBox.model_validate(
+                        #         {
+                        #             "l": pred_item.boxes,
+                        #             "r": pred_item,
+                        #             "t": pred_item,
+                        #             "b": pred_item,
+                        #         }
+                        #     ),
+                        #     cells=[],
+                        # )
+                        # clusters.append(cluster)
 
                     if settings.debug.visualize_raw_layout:
                         self.draw_clusters_and_cells_side_by_side(
